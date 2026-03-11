@@ -77,6 +77,27 @@ MANUAL_SECTION_MAPPING = {
 PROCESSED_STORE_DIR = Path(__file__).resolve().parent / "processed_store"
 PROCESSED_INDEX_FILE = PROCESSED_STORE_DIR / "index.jsonl"
 
+NUMERIC_COLUMNS = ["capacity", "used_capacity", "remaining_capacity", "no_handling_units"]
+REQUIRED_MAPPING_COLUMNS = ["bin_id", "aisle", "level", "zone", "storage_section"]
+REQUIRED_RUNTIME_COLUMNS = {
+    "zone",
+    "aisle",
+    "level",
+    "storage_section",
+    "storage_section_desc",
+    "bin_type",
+    "occupancy_state",
+    "status",
+    "storage_type_class",
+    "capacity",
+    "used_capacity",
+    "bin_id",
+    "is_empty",
+    "stack",
+    "disabled_reason",
+}
+TYPE_FILTER_OPTIONS = ["ALL", "PICKING (RHP*)", "BUFFER (RHB*)", "OTHER"]
+
 
 def normalize_col_name(name: str) -> str:
     return re.sub(r"[^a-z0-9]+", "", str(name).strip().lower())
@@ -173,6 +194,43 @@ def load_processed_metadata(processed_id: str) -> Optional[Dict[str, Any]]:
     return latest_match
 
 
+def get_dataset_id_from_query() -> str:
+    raw_value = st.query_params.get("dataset_id", "")
+    if isinstance(raw_value, list):
+        raw_value = raw_value[0] if raw_value else ""
+    return normalize_processed_id(str(raw_value or ""))
+
+
+def set_dataset_id_query(processed_id: str) -> None:
+    normalized_id = normalize_processed_id(processed_id)
+    if not normalized_id:
+        return
+    st.query_params["dataset_id"] = normalized_id
+
+
+def build_share_urls(processed_id: str) -> tuple[str, str]:
+    normalized_id = normalize_processed_id(processed_id)
+    relative_url = f"?dataset_id={normalized_id}"
+    absolute_url = relative_url
+
+    host = ""
+    scheme = "https"
+    try:
+        host = str(st.context.headers.get("host", "")).strip()
+        forwarded_proto = str(st.context.headers.get("x-forwarded-proto", "")).strip()
+        if forwarded_proto:
+            scheme = forwarded_proto.split(",")[0].strip() or scheme
+    except Exception:
+        host = ""
+
+    if host:
+        base_path = str(st.get_option("server.baseUrlPath") or "").strip("/")
+        prefix = f"/{base_path}" if base_path else ""
+        absolute_url = f"{scheme}://{host}{prefix}/?dataset_id={normalized_id}"
+
+    return relative_url, absolute_url
+
+
 def format_uploaded_at(value: object) -> str:
     text = str(value or "").strip()
     if not text:
@@ -184,6 +242,112 @@ def format_uploaded_at(value: object) -> str:
     return dt.strftime("%Y-%m-%d %H:%M:%S")
 
 
+def resolve_sidebar_dataset_info(
+    source_mode: str,
+    restored_metadata: Optional[Dict[str, Any]],
+    saved_metadata: Optional[Dict[str, Any]],
+    saved_path: Optional[Path],
+) -> tuple[str, str]:
+    uploaded_at = "Unknown"
+    source_name = "Unknown"
+
+    if source_mode == "Restore by ID":
+        uploaded_at = format_uploaded_at((restored_metadata or {}).get("uploaded_at"))
+        restored_source_name = str((restored_metadata or {}).get("source_name", "")).strip()
+        if restored_source_name:
+            source_name = restored_source_name
+    elif source_mode == "Upload file":
+        uploaded_at = format_uploaded_at((saved_metadata or {}).get("uploaded_at"))
+        uploaded_source_name = str((saved_metadata or {}).get("source_name", "")).strip()
+        if uploaded_source_name:
+            source_name = uploaded_source_name
+        elif saved_path is not None:
+            source_name = saved_path.name
+
+    return uploaded_at, source_name
+
+
+def render_dataset_info_sidebar(
+    dataset_info_box,
+    processed_id: str,
+    uploaded_at: str,
+    source_name: str,
+) -> None:
+    relative_share_url, absolute_share_url = build_share_urls(processed_id)
+    share_url_state_key = "share_url_value"
+    with dataset_info_box:
+        st.header("Dataset Info")
+        st.code(processed_id)
+        st.caption(f"Uploaded: {uploaded_at}")
+        st.caption(f"Source: {source_name}")
+        if st.button("Copy Share URL", use_container_width=True, key="copy_share_url_btn"):
+            st.session_state[share_url_state_key] = absolute_share_url
+        if st.session_state.get(share_url_state_key):
+            st.code(st.session_state[share_url_state_key])
+            st.caption("Use the copy icon on the right of the URL block.")
+            if absolute_share_url == relative_share_url:
+                st.caption("Tip: Full URL unavailable in this runtime. Query URL still works.")
+
+
+def collect_column_mapping(columns: List[str]) -> Dict[str, Optional[str]]:
+    st.sidebar.header("Column Mapping")
+    mapping: Dict[str, Optional[str]] = {}
+    for key, candidates in DEFAULT_MAPPING.items():
+        default_name = find_best_default(columns, candidates)
+        mapping[key] = choose_column(f"{key}", columns, default_name)
+    return mapping
+
+
+def list_missing_required_mapping(mapping: Dict[str, Optional[str]]) -> List[str]:
+    return [k for k in REQUIRED_MAPPING_COLUMNS if mapping.get(k) is None]
+
+
+def list_missing_runtime_columns(df: pd.DataFrame) -> List[str]:
+    return sorted(REQUIRED_RUNTIME_COLUMNS.difference(df.columns))
+
+
+def collect_sidebar_filters(df: pd.DataFrame) -> tuple[str, str, str, str, str]:
+    st.sidebar.header("Filters")
+    zones = ["ALL"] + sorted(df["zone"].unique().tolist())
+    aisles = ["ALL"] + sorted(df["aisle"].unique().tolist())
+    levels = ["ALL"] + sorted(df["level"].unique().tolist())
+    sections = ["ALL"] + sorted(df["storage_section"].unique().tolist())
+
+    type_filter = st.sidebar.selectbox("Storage Type Group", TYPE_FILTER_OPTIONS)
+    selected_zone = st.sidebar.selectbox("Zone", zones)
+    selected_section = st.sidebar.selectbox("Storage Section", sections)
+    selected_aisle = st.sidebar.selectbox("Aisle", aisles)
+    selected_level = st.sidebar.selectbox("Level", levels)
+    return type_filter, selected_zone, selected_section, selected_aisle, selected_level
+
+
+def apply_filters(
+    df: pd.DataFrame,
+    type_filter: str,
+    selected_zone: str,
+    selected_section: str,
+    selected_aisle: str,
+    selected_level: str,
+) -> pd.DataFrame:
+    filtered = df.copy()
+    if type_filter == "PICKING (RHP*)":
+        filtered = filtered[filtered["storage_type_class"] == "PICKING"]
+    elif type_filter == "BUFFER (RHB*)":
+        filtered = filtered[filtered["storage_type_class"] == "BUFFER"]
+    elif type_filter == "OTHER":
+        filtered = filtered[filtered["storage_type_class"] == "OTHER"]
+
+    if selected_zone != "ALL":
+        filtered = filtered[filtered["zone"] == selected_zone]
+    if selected_section != "ALL":
+        filtered = filtered[filtered["storage_section"] == selected_section]
+    if selected_aisle != "ALL":
+        filtered = filtered[filtered["aisle"] == selected_aisle]
+    if selected_level != "ALL":
+        filtered = filtered[filtered["level"] == selected_level]
+    return filtered
+
+
 def load_processed_df(processed_id: str) -> Optional[pd.DataFrame]:
     normalized_id = normalize_processed_id(processed_id)
     if not normalized_id:
@@ -192,7 +356,7 @@ def load_processed_df(processed_id: str) -> Optional[pd.DataFrame]:
     if not input_path.exists():
         return None
     out = pd.read_csv(input_path)
-    for col in ["capacity", "used_capacity", "remaining_capacity", "no_handling_units"]:
+    for col in NUMERIC_COLUMNS:
         if col in out.columns:
             out[col] = safe_number(out[col])
     if "is_empty" in out.columns:
@@ -302,10 +466,8 @@ def build_mapped_df(df: pd.DataFrame, mapping: Dict[str, Optional[str]]) -> pd.D
     for target_col, source_col in mapping.items():
         out[target_col] = df[source_col] if source_col in df.columns else None
 
-    out["capacity"] = safe_number(out["capacity"])
-    out["used_capacity"] = safe_number(out["used_capacity"])
-    out["remaining_capacity"] = safe_number(out["remaining_capacity"])
-    out["no_handling_units"] = safe_number(out["no_handling_units"])
+    for col in NUMERIC_COLUMNS:
+        out[col] = safe_number(out[col])
 
     missing_capacity = out["capacity"] <= 0
     out.loc[missing_capacity, "capacity"] = out.loc[missing_capacity, "remaining_capacity"]
@@ -557,11 +719,24 @@ def main() -> None:
         "Upload an Excel file and explore picking/buffer allocation, availability, disabled bins, and capacity utilization."
     )
 
+    query_dataset_id = get_dataset_id_from_query()
+    source_default_index = 1 if query_dataset_id else 0
     st.sidebar.header("Data Source")
-    source_mode = st.sidebar.radio("Select source", ["Upload file", "Restore by ID"])
+    source_mode = st.sidebar.radio("Select source", ["Upload file", "Restore by ID"], index=source_default_index)
+    dataset_info_box = st.sidebar.container()
+    restored_metadata: Optional[Dict[str, Any]] = None
+    saved_metadata: Optional[Dict[str, Any]] = None
+    saved_path: Optional[Path] = None
+
+    if query_dataset_id and "restore_dataset_id" not in st.session_state:
+        st.session_state["restore_dataset_id"] = query_dataset_id
 
     if source_mode == "Restore by ID":
-        requested_id = st.sidebar.text_input("Processed ID", placeholder="BIN-1234ABCD...")
+        requested_id = st.sidebar.text_input(
+            "Processed ID",
+            placeholder="BIN-1234ABCD...",
+            key="restore_dataset_id",
+        )
         if not requested_id.strip():
             st.info("Enter a processed ID in the sidebar to restore a previous run.")
             return
@@ -572,12 +747,6 @@ def main() -> None:
             st.error(f"No saved processed dataset found for ID: {processed_id}")
             return
         st.sidebar.success("Processed dataset restored.")
-        st.sidebar.code(processed_id)
-        if restored_metadata:
-            st.sidebar.caption(f"Uploaded: {format_uploaded_at(restored_metadata.get('uploaded_at'))}")
-            source_name = str(restored_metadata.get("source_name", "")).strip()
-            if source_name:
-                st.sidebar.caption(f"Source: {source_name}")
     else:
         uploaded_file = st.file_uploader("Upload file", type=["xlsx", "xls", "csv"])
         if not uploaded_file:
@@ -599,16 +768,9 @@ def main() -> None:
             st.error("The uploaded file is empty.")
             return
 
-        st.sidebar.header("Column Mapping")
         columns = list(raw_df.columns)
-
-        mapping = {}
-        for key, candidates in DEFAULT_MAPPING.items():
-            default_name = find_best_default(columns, candidates)
-            mapping[key] = choose_column(f"{key}", columns, default_name)
-
-        required = ["bin_id", "aisle", "level", "zone", "storage_section"]
-        missing_required = [k for k in required if mapping.get(k) is None]
+        mapping = collect_column_mapping(columns)
+        missing_required = list_missing_required_mapping(mapping)
         if missing_required:
             st.error(f"Missing required column mappings: {', '.join(missing_required)}")
             st.stop()
@@ -620,54 +782,26 @@ def main() -> None:
         saved_path = persist_processed_df(df, processed_id, getattr(uploaded_file, "name", "uploaded_file"))
         saved_metadata = load_processed_metadata(processed_id)
 
-        st.sidebar.header("Processed Dataset")
-        st.sidebar.code(processed_id)
-        st.sidebar.caption(f"Saved as {saved_path.name}")
-        if saved_metadata:
-            st.sidebar.caption(f"Uploaded: {format_uploaded_at(saved_metadata.get('uploaded_at'))}")
-
-    dashboard_uploaded_at = "Unknown"
-    if source_mode == "Restore by ID":
-        dashboard_uploaded_at = format_uploaded_at((restored_metadata or {}).get("uploaded_at"))
-    elif source_mode == "Upload file":
-        dashboard_uploaded_at = format_uploaded_at((saved_metadata or {}).get("uploaded_at"))
-
-    st.info(f"Current Dataset ID: {processed_id}")
-    meta_col1, meta_col2 = st.columns(2)
-    meta_col1.metric("Dataset Version", processed_id)
-    meta_col2.metric("Uploaded At", dashboard_uploaded_at)
-
-    st.sidebar.header("Filters")
-    zones = ["ALL"] + sorted(df["zone"].unique().tolist())
-    aisles = ["ALL"] + sorted(df["aisle"].unique().tolist())
-    levels = ["ALL"] + sorted(df["level"].unique().tolist())
-    sections = ["ALL"] + sorted(df["storage_section"].unique().tolist())
-
-    type_filter = st.sidebar.selectbox(
-        "Storage Type Group",
-        ["ALL", "PICKING (RHP*)", "BUFFER (RHB*)", "OTHER"],
+    sidebar_uploaded_at, sidebar_source_name = resolve_sidebar_dataset_info(
+        source_mode,
+        restored_metadata,
+        saved_metadata,
+        saved_path,
     )
+    render_dataset_info_sidebar(dataset_info_box, processed_id, sidebar_uploaded_at, sidebar_source_name)
+    set_dataset_id_query(processed_id)
 
-    selected_zone = st.sidebar.selectbox("Zone", zones)
-    selected_section = st.sidebar.selectbox("Storage Section", sections)
-    selected_aisle = st.sidebar.selectbox("Aisle", aisles)
-    selected_level = st.sidebar.selectbox("Level", levels)
+    missing_runtime_columns = list_missing_runtime_columns(df)
+    if missing_runtime_columns:
+        st.error(
+            "This dataset version is incomplete/corrupted for dashboard rendering. "
+            f"Missing columns: {', '.join(missing_runtime_columns)}"
+        )
+        st.info("Please upload the original file again to regenerate a valid processed dataset version.")
+        return
 
-    filtered = df.copy()
-    if type_filter == "PICKING (RHP*)":
-        filtered = filtered[filtered["storage_type_class"] == "PICKING"]
-    elif type_filter == "BUFFER (RHB*)":
-        filtered = filtered[filtered["storage_type_class"] == "BUFFER"]
-    elif type_filter == "OTHER":
-        filtered = filtered[filtered["storage_type_class"] == "OTHER"]
-    if selected_zone != "ALL":
-        filtered = filtered[filtered["zone"] == selected_zone]
-    if selected_section != "ALL":
-        filtered = filtered[filtered["storage_section"] == selected_section]
-    if selected_aisle != "ALL":
-        filtered = filtered[filtered["aisle"] == selected_aisle]
-    if selected_level != "ALL":
-        filtered = filtered[filtered["level"] == selected_level]
+    type_filter, selected_zone, selected_section, selected_aisle, selected_level = collect_sidebar_filters(df)
+    filtered = apply_filters(df, type_filter, selected_zone, selected_section, selected_aisle, selected_level)
 
     if filtered.empty:
         st.warning("No rows match the current filters.")
