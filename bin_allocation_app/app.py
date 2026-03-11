@@ -333,7 +333,6 @@ def render_dataset_info_sidebar(
 
 
 def collect_column_mapping(columns: List[str]) -> Dict[str, Optional[str]]:
-    st.sidebar.header("Column Mapping")
     mapping: Dict[str, Optional[str]] = {}
     for key, candidates in DEFAULT_MAPPING.items():
         default_name = find_best_default(columns, candidates)
@@ -350,17 +349,16 @@ def list_missing_runtime_columns(df: pd.DataFrame) -> List[str]:
 
 
 def collect_sidebar_filters(df: pd.DataFrame) -> tuple[str, str, str, str, str]:
-    st.sidebar.header("Filters")
     zones = ["ALL"] + sorted(df["zone"].unique().tolist())
     aisles = ["ALL"] + sorted(df["aisle"].unique().tolist())
     levels = ["ALL"] + sorted(df["level"].unique().tolist())
     sections = ["ALL"] + sorted(df["storage_section"].unique().tolist())
 
-    type_filter = st.sidebar.selectbox("Storage Type Group", TYPE_FILTER_OPTIONS)
-    selected_zone = st.sidebar.selectbox("Zone", zones)
-    selected_section = st.sidebar.selectbox("Storage Section", sections)
-    selected_aisle = st.sidebar.selectbox("Aisle", aisles)
-    selected_level = st.sidebar.selectbox("Level", levels)
+    type_filter = st.selectbox("Storage Type Group", TYPE_FILTER_OPTIONS)
+    selected_zone = st.selectbox("Zone", zones)
+    selected_section = st.selectbox("Storage Section", sections)
+    selected_aisle = st.selectbox("Aisle", aisles)
+    selected_level = st.selectbox("Level", levels)
     return type_filter, selected_zone, selected_section, selected_aisle, selected_level
 
 
@@ -412,7 +410,7 @@ def load_processed_df(processed_id: str) -> Optional[pd.DataFrame]:
 def choose_column(label: str, columns: List[str], default_name: Optional[str]) -> Optional[str]:
     options = ["<not present>"] + columns
     default_idx = options.index(default_name) if default_name in options else 0
-    selected = st.sidebar.selectbox(label, options, index=default_idx)
+    selected = st.selectbox(label, options, index=default_idx)
     return None if selected == "<not present>" else selected
 
 
@@ -763,10 +761,11 @@ def main() -> None:
     )
 
     query_dataset_id = get_dataset_id_from_query()
-    st.sidebar.header("Data Source")
-    st.sidebar.caption("Restore by ID (or upload a new file)")
     source_mode = "Restore by ID"
+    load_box = st.sidebar.container()
+    mapping_box = st.sidebar.container()
     dataset_info_box = st.sidebar.container()
+    filters_box = st.sidebar.container()
     restored_metadata: Optional[Dict[str, Any]] = None
     saved_metadata: Optional[Dict[str, Any]] = None
     saved_path: Optional[Path] = None
@@ -780,36 +779,41 @@ def main() -> None:
     if pending_restore_id:
         st.session_state["restore_dataset_id"] = pending_restore_id
 
-    requested_id = st.sidebar.text_input(
-        "Processed ID",
-        placeholder="BIN-1234ABCD...",
-        key="restore_dataset_id",
-    )
-    uploaded_file = st.sidebar.file_uploader("Upload new file", type=["xlsx", "xls", "csv"])
+    with load_box:
+        st.header("Load Dataset")
+        st.caption("Restore by Dataset ID or upload a new file.")
+        requested_id = st.text_input(
+            "Processed ID",
+            placeholder="BIN-1234ABCD...",
+            key="restore_dataset_id",
+        )
+        uploaded_file = st.file_uploader("Upload new file", type=["xlsx", "xls", "csv"])
 
     if uploaded_file is not None:
         source_mode = "Upload file"
         try:
             raw_df = load_data(uploaded_file)
         except BadZipFile:
-            st.error(
+            load_box.error(
                 "The uploaded Excel file appears corrupted/incomplete. "
                 "Please re-export it or save it again in Excel, or upload CSV."
             )
             return
         except Exception as exc:
-            st.error(f"Could not parse file: {exc}")
+            load_box.error(f"Could not parse file: {exc}")
             return
         if raw_df.empty:
-            st.error("The uploaded file is empty.")
+            load_box.error("The uploaded file is empty.")
             return
 
         columns = list(raw_df.columns)
-        mapping = collect_column_mapping(columns)
+        with mapping_box:
+            st.header("Column Mapping")
+            mapping = collect_column_mapping(columns)
         missing_required = list_missing_required_mapping(mapping)
         if missing_required:
-            st.error(f"Missing required column mappings: {', '.join(missing_required)}")
-            st.stop()
+            mapping_box.error(f"Missing required column mappings: {', '.join(missing_required)}")
+            return
 
         df = build_mapped_df(raw_df, mapping)
         section_mapping = load_section_mapping(DEFAULT_CODES_PDF)
@@ -818,19 +822,19 @@ def main() -> None:
         saved_path = persist_processed_df(df, processed_id, getattr(uploaded_file, "name", "uploaded_file"))
         saved_metadata = load_processed_metadata(processed_id)
         st.session_state["pending_restore_dataset_id"] = processed_id
-        st.sidebar.success("New file processed.")
+        load_box.success(f"New file processed as {processed_id}.")
     else:
         if not requested_id.strip():
-            st.info("Enter a processed ID in the sidebar or upload a new file.")
+            load_box.info("Enter a processed ID or upload a new file.")
             return
 
         processed_id = normalize_processed_id(requested_id)
         df = load_processed_df(processed_id)
         restored_metadata = load_processed_metadata(processed_id)
         if df is None:
-            st.error(f"No saved processed dataset found for ID: {processed_id}")
+            load_box.error(f"No saved processed dataset found for ID: {processed_id}")
             return
-        st.sidebar.success("Processed dataset restored.")
+        load_box.success(f"Restored dataset {processed_id}.")
 
     sidebar_uploaded_at, sidebar_source_name = resolve_sidebar_dataset_info(
         source_mode,
@@ -851,7 +855,9 @@ def main() -> None:
         st.info("Please upload the original file again to regenerate a valid processed dataset version.")
         return
 
-    type_filter, selected_zone, selected_section, selected_aisle, selected_level = collect_sidebar_filters(df)
+    with filters_box:
+        st.header("Filters")
+        type_filter, selected_zone, selected_section, selected_aisle, selected_level = collect_sidebar_filters(df)
     filtered = apply_filters(df, type_filter, selected_zone, selected_section, selected_aisle, selected_level)
 
     if filtered.empty:
