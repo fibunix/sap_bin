@@ -776,6 +776,10 @@ def main() -> None:
         st.session_state["restore_dataset_id"] = query_dataset_id
         st.session_state["query_dataset_id_applied"] = query_dataset_id
 
+    pending_restore_id = str(st.session_state.pop("pending_restore_dataset_id", "")).strip()
+    if pending_restore_id:
+        st.session_state["restore_dataset_id"] = pending_restore_id
+
     requested_id = st.sidebar.text_input(
         "Processed ID",
         placeholder="BIN-1234ABCD...",
@@ -813,7 +817,7 @@ def main() -> None:
         processed_id = generate_processed_id(df)
         saved_path = persist_processed_df(df, processed_id, getattr(uploaded_file, "name", "uploaded_file"))
         saved_metadata = load_processed_metadata(processed_id)
-        st.session_state["restore_dataset_id"] = processed_id
+        st.session_state["pending_restore_dataset_id"] = processed_id
         st.sidebar.success("New file processed.")
     else:
         if not requested_id.strip():
