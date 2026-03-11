@@ -9,6 +9,7 @@ from pathlib import Path
 import pandas as pd
 import plotly.express as px
 import streamlit as st
+import streamlit.components.v1 as components
 from pypdf import PdfReader
 
 st.set_page_config(page_title="Bin Allocation Visualizer", layout="wide")
@@ -274,19 +275,61 @@ def render_dataset_info_sidebar(
     source_name: str,
 ) -> None:
     relative_share_url, absolute_share_url = build_share_urls(processed_id)
-    share_url_state_key = "share_url_value"
+    share_url = absolute_share_url if absolute_share_url != relative_share_url else relative_share_url
+    js_share_url = json.dumps(share_url)
     with dataset_info_box:
         st.header("Dataset Info")
         st.code(processed_id)
         st.caption(f"Uploaded: {uploaded_at}")
         st.caption(f"Source: {source_name}")
-        if st.button("Copy Share URL", use_container_width=True, key="copy_share_url_btn"):
-            st.session_state[share_url_state_key] = absolute_share_url
-        if st.session_state.get(share_url_state_key):
-            st.code(st.session_state[share_url_state_key])
-            st.caption("Use the copy icon on the right of the URL block.")
-            if absolute_share_url == relative_share_url:
-                st.caption("Tip: Full URL unavailable in this runtime. Query URL still works.")
+        st.code(share_url)
+        components.html(
+            f"""
+            <div style=\"display:grid;gap:6px;\">
+              <button
+                id=\"copy-btn\"
+                style=\"width:100%;padding:0.5rem 0.75rem;border-radius:0.5rem;border:1px solid #4b5563;background:#111827;color:#f9fafb;cursor:pointer;\"
+              >
+                Copy Share URL
+              </button>
+              <div id=\"copy-status\" style=\"font-size:12px;color:#9ca3af;\"></div>
+            </div>
+            <script>
+              const url = {js_share_url};
+              const btn = document.getElementById('copy-btn');
+              const status = document.getElementById('copy-status');
+
+              async function copyText(value) {{
+                if (navigator.clipboard && window.isSecureContext) {{
+                  await navigator.clipboard.writeText(value);
+                  return;
+                }}
+                const ta = document.createElement('textarea');
+                ta.value = value;
+                ta.style.position = 'fixed';
+                ta.style.left = '-1000px';
+                document.body.appendChild(ta);
+                ta.focus();
+                ta.select();
+                const ok = document.execCommand('copy');
+                document.body.removeChild(ta);
+                if (!ok) throw new Error('copy_failed');
+              }}
+
+              btn.addEventListener('click', async () => {{
+                try {{
+                  await copyText(url);
+                  status.textContent = 'Copied to clipboard.';
+                }} catch (e) {{
+                  status.textContent = 'Clipboard blocked by browser. Use copy icon on URL block.';
+                }}
+              }});
+            </script>
+            """,
+            height=86,
+        )
+        if absolute_share_url == relative_share_url:
+            st.caption("Full URL unavailable in this runtime. Query URL still works.")
 
 
 def collect_column_mapping(columns: List[str]) -> Dict[str, Optional[str]]:
@@ -720,67 +763,36 @@ def main() -> None:
     )
 
     query_dataset_id = get_dataset_id_from_query()
-    source_default_index = 1 if query_dataset_id else 0
     st.sidebar.header("Data Source")
-    source_mode = st.sidebar.radio("Select source", ["Upload file", "Restore by ID"], index=source_default_index)
-    dataset_info_box = st.sidebar.container()
+    st.sidebar.caption("Restore by ID")
+    source_mode = "Restore by ID"
+    dataset_info_box = None
     restored_metadata: Optional[Dict[str, Any]] = None
     saved_metadata: Optional[Dict[str, Any]] = None
     saved_path: Optional[Path] = None
 
-    if query_dataset_id and "restore_dataset_id" not in st.session_state:
+    applied_query_id = str(st.session_state.get("query_dataset_id_applied", "")).strip()
+    if query_dataset_id and query_dataset_id != applied_query_id:
         st.session_state["restore_dataset_id"] = query_dataset_id
+        st.session_state["query_dataset_id_applied"] = query_dataset_id
 
-    if source_mode == "Restore by ID":
-        requested_id = st.sidebar.text_input(
-            "Processed ID",
-            placeholder="BIN-1234ABCD...",
-            key="restore_dataset_id",
-        )
-        if not requested_id.strip():
-            st.info("Enter a processed ID in the sidebar to restore a previous run.")
-            return
-        processed_id = normalize_processed_id(requested_id)
-        df = load_processed_df(processed_id)
-        restored_metadata = load_processed_metadata(processed_id)
-        if df is None:
-            st.error(f"No saved processed dataset found for ID: {processed_id}")
-            return
-        st.sidebar.success("Processed dataset restored.")
-    else:
-        uploaded_file = st.file_uploader("Upload file", type=["xlsx", "xls", "csv"])
-        if not uploaded_file:
-            st.info("Upload a file to begin.")
-            return
+    requested_id = st.sidebar.text_input(
+        "Processed ID",
+        placeholder="BIN-1234ABCD...",
+        key="restore_dataset_id",
+    )
+    dataset_info_box = st.sidebar.container()
+    if not requested_id.strip():
+        st.info("Enter a processed ID in the sidebar to restore a previous run.")
+        return
 
-        try:
-            raw_df = load_data(uploaded_file)
-        except BadZipFile:
-            st.error(
-                "The uploaded Excel file appears corrupted/incomplete. "
-                "Please re-export it or save it again in Excel, or upload CSV."
-            )
-            return
-        except Exception as exc:
-            st.error(f"Could not parse file: {exc}")
-            return
-        if raw_df.empty:
-            st.error("The uploaded file is empty.")
-            return
-
-        columns = list(raw_df.columns)
-        mapping = collect_column_mapping(columns)
-        missing_required = list_missing_required_mapping(mapping)
-        if missing_required:
-            st.error(f"Missing required column mappings: {', '.join(missing_required)}")
-            st.stop()
-
-        df = build_mapped_df(raw_df, mapping)
-        section_mapping = load_section_mapping(DEFAULT_CODES_PDF)
-        df["storage_section_desc"] = df["storage_section"].map(section_mapping).fillna("UNMAPPED")
-        processed_id = generate_processed_id(df)
-        saved_path = persist_processed_df(df, processed_id, getattr(uploaded_file, "name", "uploaded_file"))
-        saved_metadata = load_processed_metadata(processed_id)
+    processed_id = normalize_processed_id(requested_id)
+    df = load_processed_df(processed_id)
+    restored_metadata = load_processed_metadata(processed_id)
+    if df is None:
+        st.error(f"No saved processed dataset found for ID: {processed_id}")
+        return
+    st.sidebar.success("Processed dataset restored.")
 
     sidebar_uploaded_at, sidebar_source_name = resolve_sidebar_dataset_info(
         source_mode,
@@ -788,8 +800,11 @@ def main() -> None:
         saved_metadata,
         saved_path,
     )
+    if dataset_info_box is None:
+        dataset_info_box = st.sidebar.container()
     render_dataset_info_sidebar(dataset_info_box, processed_id, sidebar_uploaded_at, sidebar_source_name)
     set_dataset_id_query(processed_id)
+    st.session_state["query_dataset_id_applied"] = processed_id
 
     missing_runtime_columns = list_missing_runtime_columns(df)
     if missing_runtime_columns:
