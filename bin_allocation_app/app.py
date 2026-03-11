@@ -9,7 +9,6 @@ from pathlib import Path
 import pandas as pd
 import plotly.express as px
 import streamlit as st
-from pypdf import PdfReader
 
 st.set_page_config(page_title="Bin Allocation Visualizer", layout="wide")
 
@@ -61,18 +60,7 @@ COLOR_MAP = {
     "UNKNOWN": "#7f7f7f",
 }
 
-DEFAULT_CODES_PDF = (
-    "/Users/fibunix/Library/Containers/net.whatsapp.WhatsApp/Data/tmp/documents/"
-    "2CDF3076-C85B-429C-9179-A249109FBBBC/--codes.pdf"
-)
-
-MANUAL_SECTION_MAPPING = {
-    "RLY1": "Ladies",
-    "RKD1": "Kids",
-    "RMN1": "Men",
-    "RHM1": "Home",
-    "RDV1": "Divided",
-}
+SECTION_MAPPING_FILE = Path(__file__).resolve().parent / "config" / "section_mapping.json"
 
 PROCESSED_STORE_DIR = Path(__file__).resolve().parent / "processed_store"
 PROCESSED_INDEX_FILE = PROCESSED_STORE_DIR / "index.jsonl"
@@ -431,28 +419,24 @@ def derive_is_empty(row: pd.Series) -> bool:
 
 
 @st.cache_data(show_spinner=False)
-def load_section_mapping(pdf_path: str) -> Dict[str, str]:
-    if not Path(pdf_path).exists():
-        return MANUAL_SECTION_MAPPING.copy()
-    reader = PdfReader(pdf_path)
-    mapping: Dict[str, str] = {}
-    for page in reader.pages:
-        text = page.extract_text() or ""
-        for raw_line in text.splitlines():
-            line = raw_line.strip()
-            if not line or line.lower() in {"sec", "description"}:
-                continue
-            if re.match(r"^[A-Z][a-z]{2}\s[A-Z][a-z]{2}\s\d{1,2}\s", line):
-                continue
-            m = re.match(r"^([A-Z0-9]{4})(.+)$", line)
-            if not m:
-                continue
-            code = m.group(1).strip()
-            desc = m.group(2).strip()
-            if code and desc:
-                mapping[code] = desc
-    mapping.update(MANUAL_SECTION_MAPPING)
-    return mapping
+def load_section_mapping() -> Dict[str, str]:
+    if not SECTION_MAPPING_FILE.exists():
+        return {}
+
+    try:
+        with SECTION_MAPPING_FILE.open("r", encoding="utf-8") as handle:
+            raw_mapping = json.load(handle)
+    except (json.JSONDecodeError, OSError):
+        return {}
+
+    if not isinstance(raw_mapping, dict):
+        return {}
+
+    return {
+        str(code).strip().upper(): str(desc).strip()
+        for code, desc in raw_mapping.items()
+        if str(code).strip() and str(desc).strip()
+    }
 
 
 def build_mapped_df(df: pd.DataFrame, mapping: Dict[str, Optional[str]]) -> pd.DataFrame:
@@ -753,7 +737,7 @@ def main() -> None:
             return
 
         df = build_mapped_df(raw_df, mapping)
-        section_mapping = load_section_mapping(DEFAULT_CODES_PDF)
+        section_mapping = load_section_mapping()
         df["storage_section_desc"] = df["storage_section"].map(section_mapping).fillna("UNMAPPED")
         processed_id = generate_processed_id(df)
         saved_path = persist_processed_df(df, processed_id, getattr(uploaded_file, "name", "uploaded_file"))
