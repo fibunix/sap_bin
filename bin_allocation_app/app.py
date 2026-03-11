@@ -545,21 +545,6 @@ def render_charts(df: pd.DataFrame) -> None:
         fig_type = px.pie(by_type, names="bin_type", values="count", hole=0.35)
         st.plotly_chart(fig_type, use_container_width=True)
 
-        st.subheader("Disabled Reasons")
-        disabled = df[df["status"] == "DISABLED"]
-        if disabled.empty:
-            st.info("No disabled bins in current filter.")
-        else:
-            by_reason = (
-                disabled.assign(disabled_reason=disabled["disabled_reason"].replace("", "NO_REASON"))
-                .groupby("disabled_reason", as_index=False)
-                .size()
-                .rename(columns={"size": "count"})
-                .sort_values("count", ascending=False)
-            )
-            fig_reason = px.bar(by_reason, x="disabled_reason", y="count")
-            st.plotly_chart(fig_reason, use_container_width=True)
-
         st.subheader("Empty bins vs Occupied bins by Bin Type")
         by_type_occ = (
             df.groupby(["bin_type", "occupancy_state"], as_index=False)
