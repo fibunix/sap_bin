@@ -1,3 +1,5 @@
+import hashlib
+import json
 import re
 from typing import Dict, List, Optional
 from zipfile import BadZipFile
@@ -71,6 +73,9 @@ MANUAL_SECTION_MAPPING = {
     "RDV1": "Divided",
 }
 
+PROCESSED_STORE_DIR = Path(__file__).resolve().parent / "processed_store"
+PROCESSED_INDEX_FILE = PROCESSED_STORE_DIR / "index.jsonl"
+
 
 def normalize_col_name(name: str) -> str:
     return re.sub(r"[^a-z0-9]+", "", str(name).strip().lower())
@@ -110,6 +115,56 @@ def normalize_status(value: object) -> str:
 
 def safe_number(series: pd.Series) -> pd.Series:
     return pd.to_numeric(series, errors="coerce").fillna(0)
+
+
+def generate_processed_id(df: pd.DataFrame) -> str:
+    stable_df = df.reindex(sorted(df.columns), axis=1).fillna("")
+    payload = stable_df.to_csv(index=False, lineterminator="\n").encode("utf-8")
+    digest = hashlib.sha256(payload).hexdigest()[:16].upper()
+    return f"BIN-{digest}"
+
+
+def normalize_processed_id(value: str) -> str:
+    normalized = value.strip().upper()
+    if not normalized:
+        return ""
+    if normalized.startswith("BIN-"):
+        return normalized
+    return f"BIN-{normalized}"
+
+
+def persist_processed_df(df: pd.DataFrame, processed_id: str, source_name: str) -> Path:
+    PROCESSED_STORE_DIR.mkdir(parents=True, exist_ok=True)
+    output_path = PROCESSED_STORE_DIR / f"{processed_id}.csv"
+    df.to_csv(output_path, index=False)
+
+    metadata = {
+        "processed_id": processed_id,
+        "rows": int(len(df)),
+        "columns": int(len(df.columns)),
+        "source_name": source_name,
+    }
+    with PROCESSED_INDEX_FILE.open("a", encoding="utf-8") as handle:
+        handle.write(json.dumps(metadata) + "\n")
+    return output_path
+
+
+def load_processed_df(processed_id: str) -> Optional[pd.DataFrame]:
+    normalized_id = normalize_processed_id(processed_id)
+    if not normalized_id:
+        return None
+    input_path = PROCESSED_STORE_DIR / f"{normalized_id}.csv"
+    if not input_path.exists():
+        return None
+    out = pd.read_csv(input_path)
+    for col in ["capacity", "used_capacity", "remaining_capacity", "no_handling_units"]:
+        if col in out.columns:
+            out[col] = safe_number(out[col])
+    if "is_empty" in out.columns:
+        out["is_empty"] = (
+            out["is_empty"].astype(str).str.strip().str.lower().isin({"true", "1", "x", "yes", "y"})
+        )
+    return out
 
 
 def choose_column(label: str, columns: List[str], default_name: Optional[str]) -> Optional[str]:
@@ -467,43 +522,65 @@ def main() -> None:
         "Upload an Excel file and explore picking/buffer allocation, availability, disabled bins, and capacity utilization."
     )
 
-    uploaded_file = st.file_uploader("Upload file", type=["xlsx", "xls", "csv"])
-    if not uploaded_file:
-        st.info("Upload a file to begin.")
-        return
+    st.sidebar.header("Data Source")
+    source_mode = st.sidebar.radio("Select source", ["Upload file", "Restore by ID"])
 
-    try:
-        raw_df = load_data(uploaded_file)
-    except BadZipFile:
-        st.error(
-            "The uploaded Excel file appears corrupted/incomplete. "
-            "Please re-export it or save it again in Excel, or upload CSV."
-        )
-        return
-    except Exception as exc:
-        st.error(f"Could not parse file: {exc}")
-        return
-    if raw_df.empty:
-        st.error("The uploaded file is empty.")
-        return
+    if source_mode == "Restore by ID":
+        requested_id = st.sidebar.text_input("Processed ID", placeholder="BIN-1234ABCD...")
+        if not requested_id.strip():
+            st.info("Enter a processed ID in the sidebar to restore a previous run.")
+            return
+        processed_id = normalize_processed_id(requested_id)
+        df = load_processed_df(processed_id)
+        if df is None:
+            st.error(f"No saved processed dataset found for ID: {processed_id}")
+            return
+        st.sidebar.success("Processed dataset restored.")
+        st.sidebar.code(processed_id)
+    else:
+        uploaded_file = st.file_uploader("Upload file", type=["xlsx", "xls", "csv"])
+        if not uploaded_file:
+            st.info("Upload a file to begin.")
+            return
 
-    st.sidebar.header("Column Mapping")
-    columns = list(raw_df.columns)
+        try:
+            raw_df = load_data(uploaded_file)
+        except BadZipFile:
+            st.error(
+                "The uploaded Excel file appears corrupted/incomplete. "
+                "Please re-export it or save it again in Excel, or upload CSV."
+            )
+            return
+        except Exception as exc:
+            st.error(f"Could not parse file: {exc}")
+            return
+        if raw_df.empty:
+            st.error("The uploaded file is empty.")
+            return
 
-    mapping = {}
-    for key, candidates in DEFAULT_MAPPING.items():
-        default_name = find_best_default(columns, candidates)
-        mapping[key] = choose_column(f"{key}", columns, default_name)
+        st.sidebar.header("Column Mapping")
+        columns = list(raw_df.columns)
 
-    required = ["bin_id", "aisle", "level", "zone", "storage_section"]
-    missing_required = [k for k in required if mapping.get(k) is None]
-    if missing_required:
-        st.error(f"Missing required column mappings: {', '.join(missing_required)}")
-        st.stop()
+        mapping = {}
+        for key, candidates in DEFAULT_MAPPING.items():
+            default_name = find_best_default(columns, candidates)
+            mapping[key] = choose_column(f"{key}", columns, default_name)
 
-    df = build_mapped_df(raw_df, mapping)
-    section_mapping = load_section_mapping(DEFAULT_CODES_PDF)
-    df["storage_section_desc"] = df["storage_section"].map(section_mapping).fillna("UNMAPPED")
+        required = ["bin_id", "aisle", "level", "zone", "storage_section"]
+        missing_required = [k for k in required if mapping.get(k) is None]
+        if missing_required:
+            st.error(f"Missing required column mappings: {', '.join(missing_required)}")
+            st.stop()
+
+        df = build_mapped_df(raw_df, mapping)
+        section_mapping = load_section_mapping(DEFAULT_CODES_PDF)
+        df["storage_section_desc"] = df["storage_section"].map(section_mapping).fillna("UNMAPPED")
+        processed_id = generate_processed_id(df)
+        saved_path = persist_processed_df(df, processed_id, getattr(uploaded_file, "name", "uploaded_file"))
+
+        st.sidebar.header("Processed Dataset")
+        st.sidebar.code(processed_id)
+        st.sidebar.caption(f"Saved as {saved_path.name}")
 
     st.sidebar.header("Filters")
     zones = ["ALL"] + sorted(df["zone"].unique().tolist())
@@ -550,7 +627,12 @@ def main() -> None:
     st.dataframe(filtered, use_container_width=True)
 
     csv = filtered.to_csv(index=False).encode("utf-8")
-    st.download_button("Download filtered data as CSV", data=csv, file_name="filtered_bins.csv", mime="text/csv")
+    st.download_button(
+        "Download filtered data as CSV",
+        data=csv,
+        file_name=f"filtered_bins_{processed_id}.csv",
+        mime="text/csv",
+    )
 
 
 if __name__ == "__main__":
