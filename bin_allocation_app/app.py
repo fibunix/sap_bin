@@ -1,7 +1,8 @@
 import hashlib
 import json
 import re
-from typing import Dict, List, Optional
+from datetime import datetime
+from typing import Any, Dict, List, Optional
 from zipfile import BadZipFile
 from pathlib import Path
 
@@ -138,15 +139,49 @@ def persist_processed_df(df: pd.DataFrame, processed_id: str, source_name: str) 
     output_path = PROCESSED_STORE_DIR / f"{processed_id}.csv"
     df.to_csv(output_path, index=False)
 
+    uploaded_at = datetime.now().isoformat(timespec="seconds")
+
     metadata = {
         "processed_id": processed_id,
         "rows": int(len(df)),
         "columns": int(len(df.columns)),
         "source_name": source_name,
+        "uploaded_at": uploaded_at,
     }
     with PROCESSED_INDEX_FILE.open("a", encoding="utf-8") as handle:
         handle.write(json.dumps(metadata) + "\n")
     return output_path
+
+
+def load_processed_metadata(processed_id: str) -> Optional[Dict[str, Any]]:
+    normalized_id = normalize_processed_id(processed_id)
+    if not normalized_id or not PROCESSED_INDEX_FILE.exists():
+        return None
+
+    latest_match: Optional[Dict[str, Any]] = None
+    with PROCESSED_INDEX_FILE.open("r", encoding="utf-8") as handle:
+        for line in handle:
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                payload = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            if str(payload.get("processed_id", "")).upper() == normalized_id:
+                latest_match = payload
+    return latest_match
+
+
+def format_uploaded_at(value: object) -> str:
+    text = str(value or "").strip()
+    if not text:
+        return "Unknown"
+    try:
+        dt = datetime.fromisoformat(text)
+    except ValueError:
+        return text
+    return dt.strftime("%Y-%m-%d %H:%M:%S")
 
 
 def load_processed_df(processed_id: str) -> Optional[pd.DataFrame]:
@@ -532,11 +567,17 @@ def main() -> None:
             return
         processed_id = normalize_processed_id(requested_id)
         df = load_processed_df(processed_id)
+        restored_metadata = load_processed_metadata(processed_id)
         if df is None:
             st.error(f"No saved processed dataset found for ID: {processed_id}")
             return
         st.sidebar.success("Processed dataset restored.")
         st.sidebar.code(processed_id)
+        if restored_metadata:
+            st.sidebar.caption(f"Uploaded: {format_uploaded_at(restored_metadata.get('uploaded_at'))}")
+            source_name = str(restored_metadata.get("source_name", "")).strip()
+            if source_name:
+                st.sidebar.caption(f"Source: {source_name}")
     else:
         uploaded_file = st.file_uploader("Upload file", type=["xlsx", "xls", "csv"])
         if not uploaded_file:
@@ -577,10 +618,24 @@ def main() -> None:
         df["storage_section_desc"] = df["storage_section"].map(section_mapping).fillna("UNMAPPED")
         processed_id = generate_processed_id(df)
         saved_path = persist_processed_df(df, processed_id, getattr(uploaded_file, "name", "uploaded_file"))
+        saved_metadata = load_processed_metadata(processed_id)
 
         st.sidebar.header("Processed Dataset")
         st.sidebar.code(processed_id)
         st.sidebar.caption(f"Saved as {saved_path.name}")
+        if saved_metadata:
+            st.sidebar.caption(f"Uploaded: {format_uploaded_at(saved_metadata.get('uploaded_at'))}")
+
+    dashboard_uploaded_at = "Unknown"
+    if source_mode == "Restore by ID":
+        dashboard_uploaded_at = format_uploaded_at((restored_metadata or {}).get("uploaded_at"))
+    elif source_mode == "Upload file":
+        dashboard_uploaded_at = format_uploaded_at((saved_metadata or {}).get("uploaded_at"))
+
+    st.info(f"Current Dataset ID: {processed_id}")
+    meta_col1, meta_col2 = st.columns(2)
+    meta_col1.metric("Dataset Version", processed_id)
+    meta_col2.metric("Uploaded At", dashboard_uploaded_at)
 
     st.sidebar.header("Filters")
     zones = ["ALL"] + sorted(df["zone"].unique().tolist())
