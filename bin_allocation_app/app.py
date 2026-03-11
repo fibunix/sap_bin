@@ -9,7 +9,6 @@ from pathlib import Path
 import pandas as pd
 import plotly.express as px
 import streamlit as st
-import streamlit.components.v1 as components
 from pypdf import PdfReader
 
 st.set_page_config(page_title="Bin Allocation Visualizer", layout="wide")
@@ -276,7 +275,6 @@ def render_dataset_info_sidebar(
 ) -> None:
     relative_share_url, absolute_share_url = build_share_urls(processed_id)
     share_url = absolute_share_url if absolute_share_url != relative_share_url else relative_share_url
-    js_share_url = json.dumps(share_url)
     with dataset_info_box:
         st.header("Dataset Info")
         st.code(processed_id)
@@ -519,15 +517,16 @@ def kpi_row(df: pd.DataFrame) -> None:
     available_bins = int((df["status"] == "AVAILABLE").sum())
     disabled_bins = int((df["status"] == "DISABLED").sum())
 
-    c1, c2, c3, c4, c5, c6, c7, c8 = st.columns(8)
-    c1.metric("Total Bins", total_bins)
-    c2.metric("Empty bins", empty_bins)
-    c3.metric("Occupied bins", occupied_bins)
-    c4.metric("Picking Bins", picking_bins)
-    c5.metric("Picking Empty", picking_empty)
-    c6.metric("Buffer Bins", buffer_bins)
-    c7.metric("Buffer Empty", buffer_empty)
-    c8.metric("Disabled", disabled_bins)
+    top_row = st.columns(4)
+    bottom_row = st.columns(4)
+    top_row[0].metric("Total Bins", total_bins)
+    top_row[1].metric("Empty bins", empty_bins)
+    top_row[2].metric("Occupied bins", occupied_bins)
+    top_row[3].metric("Disabled", disabled_bins)
+    bottom_row[0].metric("Picking Bins", picking_bins)
+    bottom_row[1].metric("Picking Empty", picking_empty)
+    bottom_row[2].metric("Buffer Bins", buffer_bins)
+    bottom_row[3].metric("Buffer Empty", buffer_empty)
     st.caption(f"Available bins: {available_bins}")
 
 
@@ -578,27 +577,6 @@ def render_charts(df: pd.DataFrame) -> None:
         )
         st.plotly_chart(fig_zone, use_container_width=True)
 
-        st.subheader("Bins per Storage Section (Empty bins vs Occupied bins)")
-        by_section = (
-            df.groupby(["storage_section", "storage_section_desc", "occupancy_state"], as_index=False)
-            .size()
-            .rename(columns={"size": "count"})
-        )
-        by_section["section_label"] = by_section["storage_section"] + " - " + by_section["storage_section_desc"]
-        section_order = (
-            by_section.groupby("section_label", as_index=False)["count"].sum().sort_values("count", ascending=False)
-        )
-        fig_section = px.bar(
-            by_section,
-            x="section_label",
-            y="count",
-            color="occupancy_state",
-            barmode="stack",
-            category_orders={"section_label": section_order["section_label"].tolist()},
-            color_discrete_map={"Empty bins": "#2ca02c", "Occupied bins": "#d62728"},
-        )
-        st.plotly_chart(fig_section, use_container_width=True)
-
         if (df["capacity"] > 0).any():
             st.subheader("Capacity Utilization by Bin Type")
             cap = (
@@ -609,6 +587,25 @@ def render_charts(df: pd.DataFrame) -> None:
             fig_util = px.bar(cap, x="bin_type", y="utilization_pct", range_y=[0, 100])
             fig_util.update_layout(yaxis_title="Utilization %")
             st.plotly_chart(fig_util, use_container_width=True)
+
+    st.subheader("Bins per Storage Section (Empty bins vs Occupied bins)")
+    by_section = (
+        df.groupby(["storage_section", "storage_section_desc", "occupancy_state"], as_index=False)
+        .size()
+        .rename(columns={"size": "count"})
+    )
+    by_section["section_label"] = by_section["storage_section"] + " - " + by_section["storage_section_desc"]
+    section_order = by_section.groupby("section_label", as_index=False)["count"].sum().sort_values("count", ascending=False)
+    fig_section = px.bar(
+        by_section,
+        x="section_label",
+        y="count",
+        color="occupancy_state",
+        barmode="stack",
+        category_orders={"section_label": section_order["section_label"].tolist()},
+        color_discrete_map={"Empty bins": "#2ca02c", "Occupied bins": "#d62728"},
+    )
+    st.plotly_chart(fig_section, use_container_width=True)
 
 
 def render_section_summary(df: pd.DataFrame) -> None:
@@ -804,21 +801,27 @@ def main() -> None:
         st.warning("No rows match the current filters.")
         return
 
+    st.subheader("Dashboard")
     kpi_row(filtered)
-    render_charts(filtered)
-    render_section_summary(filtered)
-    render_bin_map(filtered)
+    overview_tab, sections_tab, table_tab = st.tabs(["Overview", "Section Summary", "Data Table"])
 
-    st.subheader("Data Table")
-    st.dataframe(filtered, use_container_width=True)
+    with overview_tab:
+        render_charts(filtered)
+        st.divider()
+        render_bin_map(filtered)
 
-    csv = filtered.to_csv(index=False).encode("utf-8")
-    st.download_button(
-        "Download filtered data as CSV",
-        data=csv,
-        file_name=f"filtered_bins_{processed_id}.csv",
-        mime="text/csv",
-    )
+    with sections_tab:
+        render_section_summary(filtered)
+
+    with table_tab:
+        st.dataframe(filtered, use_container_width=True)
+        csv = filtered.to_csv(index=False).encode("utf-8")
+        st.download_button(
+            "Download filtered data as CSV",
+            data=csv,
+            file_name=f"filtered_bins_{processed_id}.csv",
+            mime="text/csv",
+        )
 
 
 if __name__ == "__main__":
