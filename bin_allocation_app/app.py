@@ -283,51 +283,6 @@ def render_dataset_info_sidebar(
         st.caption(f"Uploaded: {uploaded_at}")
         st.caption(f"Source: {source_name}")
         st.code(share_url)
-        components.html(
-            f"""
-            <div style=\"display:grid;gap:6px;\">
-              <button
-                id=\"copy-btn\"
-                style=\"width:100%;padding:0.5rem 0.75rem;border-radius:0.5rem;border:1px solid #4b5563;background:#111827;color:#f9fafb;cursor:pointer;\"
-              >
-                Copy Share URL
-              </button>
-              <div id=\"copy-status\" style=\"font-size:12px;color:#9ca3af;\"></div>
-            </div>
-            <script>
-              const url = {js_share_url};
-              const btn = document.getElementById('copy-btn');
-              const status = document.getElementById('copy-status');
-
-              async function copyText(value) {{
-                if (navigator.clipboard && window.isSecureContext) {{
-                  await navigator.clipboard.writeText(value);
-                  return;
-                }}
-                const ta = document.createElement('textarea');
-                ta.value = value;
-                ta.style.position = 'fixed';
-                ta.style.left = '-1000px';
-                document.body.appendChild(ta);
-                ta.focus();
-                ta.select();
-                const ok = document.execCommand('copy');
-                document.body.removeChild(ta);
-                if (!ok) throw new Error('copy_failed');
-              }}
-
-              btn.addEventListener('click', async () => {{
-                try {{
-                  await copyText(url);
-                  status.textContent = 'Copied to clipboard.';
-                }} catch (e) {{
-                  status.textContent = 'Clipboard blocked by browser. Use copy icon on URL block.';
-                }}
-              }});
-            </script>
-            """,
-            height=86,
-        )
         if absolute_share_url == relative_share_url:
             st.caption("Full URL unavailable in this runtime. Query URL still works.")
 
@@ -755,7 +710,7 @@ def load_data(file) -> pd.DataFrame:
 
 
 def main() -> None:
-    st.title("Warehouse Bin Allocation Visualizer")
+    st.title("Warehouse Bin Visualizer")
     st.write(
         "Upload an Excel file and explore picking/buffer allocation, availability, disabled bins, and capacity utilization."
     )
