@@ -764,9 +764,9 @@ def main() -> None:
 
     query_dataset_id = get_dataset_id_from_query()
     st.sidebar.header("Data Source")
-    st.sidebar.caption("Restore by ID")
+    st.sidebar.caption("Restore by ID (or upload a new file)")
     source_mode = "Restore by ID"
-    dataset_info_box = None
+    dataset_info_box = st.sidebar.container()
     restored_metadata: Optional[Dict[str, Any]] = None
     saved_metadata: Optional[Dict[str, Any]] = None
     saved_path: Optional[Path] = None
@@ -781,18 +781,52 @@ def main() -> None:
         placeholder="BIN-1234ABCD...",
         key="restore_dataset_id",
     )
-    dataset_info_box = st.sidebar.container()
-    if not requested_id.strip():
-        st.info("Enter a processed ID in the sidebar to restore a previous run.")
-        return
+    uploaded_file = st.sidebar.file_uploader("Upload new file", type=["xlsx", "xls", "csv"])
 
-    processed_id = normalize_processed_id(requested_id)
-    df = load_processed_df(processed_id)
-    restored_metadata = load_processed_metadata(processed_id)
-    if df is None:
-        st.error(f"No saved processed dataset found for ID: {processed_id}")
-        return
-    st.sidebar.success("Processed dataset restored.")
+    if uploaded_file is not None:
+        source_mode = "Upload file"
+        try:
+            raw_df = load_data(uploaded_file)
+        except BadZipFile:
+            st.error(
+                "The uploaded Excel file appears corrupted/incomplete. "
+                "Please re-export it or save it again in Excel, or upload CSV."
+            )
+            return
+        except Exception as exc:
+            st.error(f"Could not parse file: {exc}")
+            return
+        if raw_df.empty:
+            st.error("The uploaded file is empty.")
+            return
+
+        columns = list(raw_df.columns)
+        mapping = collect_column_mapping(columns)
+        missing_required = list_missing_required_mapping(mapping)
+        if missing_required:
+            st.error(f"Missing required column mappings: {', '.join(missing_required)}")
+            st.stop()
+
+        df = build_mapped_df(raw_df, mapping)
+        section_mapping = load_section_mapping(DEFAULT_CODES_PDF)
+        df["storage_section_desc"] = df["storage_section"].map(section_mapping).fillna("UNMAPPED")
+        processed_id = generate_processed_id(df)
+        saved_path = persist_processed_df(df, processed_id, getattr(uploaded_file, "name", "uploaded_file"))
+        saved_metadata = load_processed_metadata(processed_id)
+        st.session_state["restore_dataset_id"] = processed_id
+        st.sidebar.success("New file processed.")
+    else:
+        if not requested_id.strip():
+            st.info("Enter a processed ID in the sidebar or upload a new file.")
+            return
+
+        processed_id = normalize_processed_id(requested_id)
+        df = load_processed_df(processed_id)
+        restored_metadata = load_processed_metadata(processed_id)
+        if df is None:
+            st.error(f"No saved processed dataset found for ID: {processed_id}")
+            return
+        st.sidebar.success("Processed dataset restored.")
 
     sidebar_uploaded_at, sidebar_source_name = resolve_sidebar_dataset_info(
         source_mode,
@@ -800,8 +834,6 @@ def main() -> None:
         saved_metadata,
         saved_path,
     )
-    if dataset_info_box is None:
-        dataset_info_box = st.sidebar.container()
     render_dataset_info_sidebar(dataset_info_box, processed_id, sidebar_uploaded_at, sidebar_source_name)
     set_dataset_id_query(processed_id)
     st.session_state["query_dataset_id_applied"] = processed_id
